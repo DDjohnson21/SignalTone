@@ -112,6 +112,21 @@ Confirm the change in 1–2 sentences. Acknowledge you'll adjust future response
   }
 }
 
+// ─── Link footer ─────────────────────────────────────────────────────────────
+
+function buildLinkFooter(intent: ClassifiedIntent, items: SourceItem[]): string {
+  // Intents that don't benefit from source links
+  if (["save", "recall", "preference_update", "follow_up"].includes(intent.intent)) return "";
+
+  const links = items
+    .slice(0, 3)
+    .filter((item) => item.url)
+    .map((item) => `• ${item.title.slice(0, 60)}${item.title.length > 60 ? "…" : ""}\n  ${item.url}`)
+    .join("\n");
+
+  return links ? `\n\n---\nRead more:\n${links}` : "";
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function generateResponse(
@@ -125,5 +140,7 @@ export async function generateResponse(
   const userTurn = buildUserTurn(intent, sourceItems, savedIdeas);
 
   const text = await callChat(system, userTurn, 1024);
-  return text || "Something went wrong generating a response. Try again?";
+  if (!text) return "Something went wrong generating a response. Try again?";
+
+  return text + buildLinkFooter(intent, sourceItems);
 }
