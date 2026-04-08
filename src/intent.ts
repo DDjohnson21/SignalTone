@@ -55,8 +55,8 @@ const CLASSIFICATION_SYSTEM = `Classify incoming iMessage text into exactly one 
 Intent definitions:
 - daily_briefing: morning greetings, "what should I know today?", "good morning", "what's up today?"
 - evening_summary: "good night", "wrap up today", "what happened today?", "evening update"
-- topic_query: asking about a specific tech domain ("anything new in AI?", "what's happening in crypto?", "show me devtools news")
-- build_idea: asking for project/startup ideas ("what should I build?", "give me startup ideas", "what can I build this weekend?")
+- topic_query: asking about a specific tech domain ("anything new in AI?", "what's happening in crypto?", "show me devtools news", "whats new", "whats new?")
+- build_idea: asking for project/startup ideas ("what should I build?", "give me startup ideas", "what can I build this weekend?", "build?")
 - follow_up: refining or expanding the immediately previous response ("make that more technical", "turn that into a startup idea", "give me more detail", "simplify that")
 - preference_update: user is changing their profile ("I'm interested in devtools", "keep it brief", "I'm a senior engineer", "focus on AI stuff")
 - save: saving the last response/idea ("save this", "bookmark that", "save that idea")
@@ -96,7 +96,8 @@ function fallback(text: string): ClassifiedIntent {
   const t = text.toLowerCase();
   if (t.includes("morning") || t.includes("good morning")) return { intent: "daily_briefing" };
   if (t.includes("night") || t.includes("evening")) return { intent: "evening_summary" };
-  if (t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea" };
+  if (t === "build?" || t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea" };
+  if (t === "whats new" || t === "whats new?") return { intent: "topic_query" };
   if (t.includes("save") || t.includes("bookmark")) return { intent: "save" };
   if (t.includes("saved") || t.includes("recall") || t.includes("my ideas")) return { intent: "recall" };
   return { intent: "daily_briefing" };

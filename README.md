@@ -45,8 +45,8 @@ bun dev
 | --- | --- | --- |
 | `daily_briefing` | "good morning", "what should I know today?" | Top 1–3 updates with build ideas |
 | `evening_summary` | "good night", "wrap up today" | Executive recap of the day's notable shifts |
-| `topic_query` | "anything new in AI?", "what's happening in crypto?" | Filtered update for a specific domain |
-| `build_idea` | "what should I build this weekend?", "give me startup ideas" | Concrete ideas rooted in recent trends |
+| `topic_query` | "anything new in AI?", "what's happening in crypto?", "whats new", "whats new?" | Filtered update for a specific domain |
+| `build_idea` | "what should I build this weekend?", "give me startup ideas", "build?" | Concrete ideas rooted in recent trends |
 | `follow_up` | "make that more technical", "turn that into a startup idea" | Refines or expands the previous response |
 | `preference_update` | "I'm mostly interested in devtools", "keep it brief" | Updates your profile, adjusts future responses |
 | `save` | "save this", "bookmark that idea" | Saves the last idea to your list |

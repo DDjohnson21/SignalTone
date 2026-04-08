@@ -28,8 +28,27 @@ const cache = new Map<string, CacheEntry>();
 
 // ─── Hacker News ─────────────────────────────────────────────────────────────
 
-const HN_MIN_SCORE = 50; // filter low-signal stories
-const HN_FETCH_COUNT = 20; // how many top stories to fetch
+const HN_MIN_SCORE = 50;  // filter low-signal stories
+const HN_FETCH_COUNT = 30; // fetch extra to account for dead links
+
+// ─── URL validation ───────────────────────────────────────────────────────────
+
+/** HEAD → GET fallback. Returns false on timeout, network error, or 4xx/5xx. */
+async function validateUrl(url: string): Promise<boolean> {
+  for (const method of ["HEAD", "GET"] as const) {
+    try {
+      const res = await fetch(url, {
+        method,
+        signal: AbortSignal.timeout(5000),
+        redirect: "follow",
+      });
+      if (res.status !== 405) return res.status < 400;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 interface HNItem {
   id: number;
@@ -62,21 +81,35 @@ async function fetchHackerNews(): Promise<SourceItem[]> {
     })
   );
 
-  return stories
-    .filter(
-      (s): s is HNItem =>
-        s !== null &&
-        s.type === "story" &&
-        s.score >= HN_MIN_SCORE &&
-        Boolean(s.url || s.id)
-    )
-    .map((s) => ({
-      title: s.title,
-      url: s.url ?? `https://news.ycombinator.com/item?id=${s.id}`,
-      score: s.score,
-      source: "hackernews" as const,
-      publishedAt: new Date(s.time * 1000),
-    }));
+  const valid = stories.filter(
+    (s): s is HNItem =>
+      s !== null &&
+      s.type === "story" &&
+      s.score >= HN_MIN_SCORE &&
+      Boolean(s.url || s.id)
+  );
+
+  // Validate external URLs in parallel; fall back to HN comments page for dead links
+  return Promise.all(
+    valid.map(async (s) => {
+      const hnFallback = `https://news.ycombinator.com/item?id=${s.id}`;
+      let url = hnFallback;
+
+      if (s.url) {
+        const ok = await validateUrl(s.url);
+        url = ok ? s.url : hnFallback;
+        if (!ok) console.log(`[Sources] Dead link replaced with HN fallback: ${s.url}`);
+      }
+
+      return {
+        title: s.title,
+        url,
+        score: s.score,
+        source: "hackernews" as const,
+        publishedAt: new Date(s.time * 1000),
+      };
+    })
+  );
 }
 
 // ─── GitHub Trending (via Search API) ────────────────────────────────────────
