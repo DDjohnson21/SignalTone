@@ -8,6 +8,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import type { Message as AnthropicMessage } from "@anthropic-ai/sdk/resources/messages/messages.js";
 import OpenAI from "openai";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -76,8 +77,8 @@ export async function callStructured(
     return res.choices[0]?.message?.content ?? "{}";
   }
 
-  // Anthropic
-  const res = await anthropic().messages.create({
+  // Anthropic — structured outputs via output_config (SDK types may lag the API).
+  const res = (await anthropic().messages.create({
     model: llmConfig.model,
     max_tokens: maxTokens,
     output_config: {
@@ -85,7 +86,7 @@ export async function callStructured(
     },
     system,
     messages: [{ role: "user", content: user }],
-  });
+  } as never)) as AnthropicMessage;
   const block = res.content.find((b) => b.type === "text");
   return block?.type === "text" ? block.text : "{}";
 }
