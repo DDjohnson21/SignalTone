@@ -11,7 +11,7 @@ export interface SourceItem {
   title: string;
   url: string;
   score: number;
-  source: "hackernews" | "github_trending" | "arxiv" | "rss";
+  source: "hackernews" | "github_trending" | "arxiv" | "rss" | "producthunt";
   topic?: string;
   publishedAt: Date;
 }
@@ -263,6 +263,74 @@ async function fetchRSS(feedUrl: string, topic?: string): Promise<SourceItem[]> 
   }
 }
 
+// ─── Product Hunt ───────────────────────────────────────────────────────────
+
+interface PHPost {
+  name: string;
+  tagline: string | null;
+  url: string;
+  votesCount: number;
+  created_at: string;
+  topics: Array<{ slug: string; name: string }>;
+}
+
+/**
+ * Product Hunt API fetcher.
+ * Note: Product Hunt requires OAuth authentication. This implementation
+ * uses a public proxy approach — for production, set up PH OAuth and
+ * use the PH API directly with a valid access token.
+ *
+ * Alternative: Use RSS feed at https://www.producthunt.com/feed/rss
+ */
+async function fetchProductHunt(): Promise<SourceItem[]> {
+  try {
+    // Product Hunt RSS feed (no auth required, limited to ~20 items)
+    const res = await fetch("https://www.producthunt.com/feed/rss", {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return [];
+
+    const xml = await res.text();
+    const items: SourceItem[] = [];
+
+    const itemPattern = /<item>([\s\S]*?)<\/item>/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = itemPattern.exec(xml)) !== null && items.length < 8) {
+      const block = match[1];
+
+      const titleMatch = /<title>([\s\S]*?)<\/title>/.exec(block);
+      const linkMatch = /<link>([\s\S]*?)<\/link>/.exec(block);
+      const pubDateMatch = /<pubDate>([\s\S]*?)<\/pubDate>/.exec(block);
+      const descMatch = /<description>([\s\S]*?)<\/description>/.exec(block);
+
+      const title = titleMatch ? titleMatch[1].trim() : null;
+      const url = linkMatch ? linkMatch[1].trim() : null;
+      const pubDate = pubDateMatch ? pubDateMatch[1].trim() : null;
+      const desc = descMatch ? descMatch[1].trim() : null;
+
+      if (!title || !url) continue;
+
+      // Extract vote count from description if available
+      const votesMatch = /(\d+)\s*votes?/i.exec(desc ?? "");
+      const votes = votesMatch ? parseInt(votesMatch[1], 10) : 50;
+
+      items.push({
+        title,
+        url,
+        score: votes,
+        source: "producthunt",
+        topic: "devtools", // PH is mostly dev tools and consumer apps
+        publishedAt: pubDate ? new Date(pubDate) : new Date(),
+      });
+    }
+
+    return items;
+  } catch {
+    return [];
+  }
+}
+
 // ─── Scoring ─────────────────────────────────────────────────────────────────
 
 /** Exponential recency decay with a 12-hour half-life, as per Section 6.2. */
@@ -346,7 +414,7 @@ export async function getTopItems(
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
     allItems = cached.items;
   } else {
-    const [hn, gh, arxiv, ...rssResults] = await Promise.all([
+    const [hn, gh, arxiv, ph, ...rssResults] = await Promise.all([
       fetchHackerNews().catch((e) => {
         console.warn("HN fetch failed:", e);
         return [] as SourceItem[];
@@ -359,6 +427,10 @@ export async function getTopItems(
         console.warn("ArXiv fetch failed:", e);
         return [] as SourceItem[];
       }),
+      fetchProductHunt().catch((e) => {
+        console.warn("Product Hunt fetch failed:", e);
+        return [] as SourceItem[];
+      }),
       ...RSS_FEEDS.map((f) =>
         fetchRSS(f.url, f.topic).catch((e) => {
           console.warn(`RSS fetch failed (${f.url}):`, e);
@@ -368,10 +440,10 @@ export async function getTopItems(
     ]);
 
     const rssItems = rssResults.flat();
-    allItems = rank([...hn, ...gh, ...arxiv, ...rssItems], recentTopics);
+    allItems = rank([...hn, ...gh, ...arxiv, ...ph, ...rssItems], recentTopics);
     cache.set(cacheKey, { items: allItems, fetchedAt: Date.now() });
     console.log(
-      `Source cache refreshed: ${hn.length} HN + ${gh.length} GH + ${arxiv.length} ArXiv + ${rssItems.length} RSS items`
+      `Source cache refreshed: ${hn.length} HN + ${gh.length} GH + ${arxiv.length} ArXiv + ${ph.length} PH + ${rssItems.length} RSS items`
     );
   }
 
