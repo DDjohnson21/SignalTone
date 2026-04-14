@@ -12,7 +12,8 @@ export type IntentType =
   | "preference_update"
   | "save"
   | "recall"
-  | "reminder";
+  | "reminder"
+  | "onboarding";
 
 export interface ClassifiedIntent {
   intent: IntentType;
@@ -22,6 +23,7 @@ export interface ClassifiedIntent {
   preference_key?: string;
   preference_value?: string;
   time_expression?: string;
+  extracted_topics?: string[];
 }
 
 // ─── JSON schema for structured output ───────────────────────────────────────
@@ -41,6 +43,7 @@ const INTENT_SCHEMA: Record<string, unknown> = {
         "save",
         "recall",
         "reminder",
+        "onboarding",
       ],
     },
     topic:               { type: ["string", "null"] },
@@ -49,9 +52,10 @@ const INTENT_SCHEMA: Record<string, unknown> = {
     preference_key:      { type: ["string", "null"] },
     preference_value:    { type: ["string", "null"] },
     time_expression:     { type: ["string", "null"] },
+    extracted_topics:    { type: ["array", "null"], items: { type: "string" } },
   },
   // OpenAI strict mode requires all properties in required; use ["type","null"] for optional fields.
-  required: ["intent", "topic", "modifiers", "references_previous", "preference_key", "preference_value", "time_expression"],
+  required: ["intent", "topic", "modifiers", "references_previous", "preference_key", "preference_value", "time_expression", "extracted_topics"],
   additionalProperties: false,
 };
 
@@ -67,10 +71,12 @@ Intent definitions:
 - save: saving the last response/idea ("save this", "bookmark that", "save that idea")
 - recall: retrieving saved items ("what did I save?", "show me my ideas", "my saved ideas")
 - reminder: user wants a reminder in the future ("remind me in 2 hours", "remind me at 5pm", "send me this tonight")
+- onboarding: user responding to the onboarding question with topic preferences (e.g., "AI and devtools", "mostly crypto", "all tech", "I like cybersecurity and mobile")
 
 For topic_query, extract the topic (e.g., "AI", "crypto", "devtools", "web3").
 For reminder, extract time_expression (e.g. "2 hours", "5pm", "tonight").
 For preference_update, extract preference_key (topics|skill_level|response_style) and preference_value.
+For onboarding, extract extracted_topics as an array of topic strings from the user's response.
 For follow_up or build_idea with refinements, set references_previous: true.
 For modifiers: capture words like "brief", "technical", "simple", "detailed", "startup", "weekend", "quick".`;
 
@@ -101,12 +107,19 @@ export async function classifyIntent(
 /** Simple heuristic fallback if the LLM call fails. */
 function fallback(text: string): ClassifiedIntent {
   const t = text.toLowerCase();
-  if (t.includes("morning") || t.includes("good morning")) return { intent: "daily_briefing" };
-  if (t.includes("night") || t.includes("evening")) return { intent: "evening_summary" };
-  if (t === "build?" || t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea" };
-  if (t === "whats new" || t === "whats new?") return { intent: "topic_query" };
-  if (t.includes("save") || t.includes("bookmark")) return { intent: "save" };
-  if (t.includes("saved") || t.includes("recall") || t.includes("my ideas")) return { intent: "recall" };
-  if (t.includes("remind")) return { intent: "reminder" };
-  return { intent: "daily_briefing" };
+  const base = { modifiers: [] as string[], references_previous: false, extracted_topics: [] as string[] };
+  if (t.includes("morning") || t.includes("good morning")) return { intent: "daily_briefing", ...base };
+  if (t.includes("night") || t.includes("evening")) return { intent: "evening_summary", ...base };
+  if (t === "build?" || t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea", ...base };
+  if (t === "whats new" || t === "whats new?") return { intent: "topic_query", ...base };
+  if (t.includes("save") || t.includes("bookmark")) return { intent: "save", ...base };
+  if (t.includes("saved") || t.includes("recall") || t.includes("my ideas")) return { intent: "recall", ...base };
+  if (t.includes("remind")) return { intent: "reminder", ...base };
+  // Onboarding fallback: if user mentions tech topics, extract them
+  const topicKeywords = ["ai", "devtools", "crypto", "cybersecurity", "mobile", "cloud", "web3", "machine learning", "software"];
+  const foundTopics = topicKeywords.filter((kw) => t.includes(kw));
+  if (foundTopics.length > 0) {
+    return { intent: "onboarding", modifiers: [], references_previous: false, extracted_topics: foundTopics };
+  }
+  return { intent: "daily_briefing", ...base };
 }

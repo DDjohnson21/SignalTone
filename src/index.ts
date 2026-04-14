@@ -28,7 +28,7 @@ process.on("SIGINT", () => process.exit(0));
 process.on("SIGTERM", () => process.exit(0));
 import { classifyIntent } from "./intent.js";
 import { getTopItems } from "./sources.js";
-import { generateResponse } from "./response.js";
+import { generateResponse, buildOnboardingResponse } from "./response.js";
 import { startBriefingScheduler } from "./scheduler.js";
 import {
   getOrCreateUser,
@@ -43,6 +43,7 @@ import {
   bumpTopicAffinity,
   logSentUpdate,
   getRecentSentTopics,
+  isNewUser,
 } from "./db.js";
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
@@ -98,14 +99,31 @@ async function handleMessage(sender: string, text: string): Promise<void> {
 
   const t0 = Date.now();
 
-  // 1. Ensure user exists in DB; bump last_active
+  // 1. Check if this is a new user — if so, ask onboarding question first
+  const newUser = isNewUser(sender);
+  if (newUser) {
+    console.log(`[${sender}] New user detected — running onboarding`);
+    agentSent.add(text);
+    setTimeout(() => agentSent.delete(text), 30_000);
+    await sdk.send(
+      sender,
+      "Hey! I'm SignalTone, your tech briefing agent. To make my responses more useful, " +
+      "what topics should I focus on? (e.g. AI, devtools, crypto, cybersecurity, mobile, cloud) " +
+      "Just reply with 1-3 interests, or say 'all tech' for a broad feed."
+    );
+    addConversationTurn(sender, "user", text, "onboarding");
+    addConversationTurn(sender, "agent", "onboarding_question", "onboarding");
+    return;
+  }
+
+  // 2. Ensure user exists in DB; bump last_active
   const user = getOrCreateUser(sender);
   updateUserLastActive(sender);
 
-  // 2. Load recent conversation for context (last 5 turns per Section 9.2)
+  // 3. Load recent conversation for context (last 5 turns per Section 9.2)
   const history = getRecentConversation(sender, 5);
 
-  // 3. Classify intent — single LLM call returning structured JSON
+  // 4. Classify intent — single LLM call returning structured JSON
   const intent = await classifyIntent(text, history);
   console.log(`[${sender}] intent=${intent.intent}${intent.topic ? ` topic=${intent.topic}` : ""}`);
 
@@ -126,6 +144,12 @@ async function handleMessage(sender: string, text: string): Promise<void> {
     }
   }
 
+  // Handle onboarding — extract and save topics from user's response
+  if (intent.intent === "onboarding" && intent.extracted_topics && intent.extracted_topics.length > 0) {
+    updateUserProfile(sender, { topics: intent.extracted_topics });
+    console.log(`[${sender}] Onboarding topics saved: ${intent.extracted_topics.join(", ")}`);
+  }
+
   // 5. Fetch source items for content-driven intents
   const needsSources = [
     "daily_briefing",
@@ -133,6 +157,18 @@ async function handleMessage(sender: string, text: string): Promise<void> {
     "topic_query",
     "build_idea",
   ].includes(intent.intent);
+
+  // Skip sources for onboarding responses
+  if (intent.intent === "onboarding") {
+    const response = buildOnboardingResponse(intent);
+    agentSent.add(response);
+    setTimeout(() => agentSent.delete(response), 30_000);
+    await sdk.send(sender, response);
+    addConversationTurn(sender, "user", text, intent.intent);
+    addConversationTurn(sender, "agent", response, intent.intent);
+    console.log(`[${sender}] responded in ${Date.now() - t0}ms (${response.length} chars)`);
+    return;
+  }
 
   const seenUrls = getRecentSentUrls(sender, 48);
   const recentTopics = getRecentSentTopics(sender, 48);

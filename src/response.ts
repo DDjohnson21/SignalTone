@@ -3,6 +3,16 @@ import type { ClassifiedIntent } from "./intent.js";
 import type { UserProfile, ConversationTurn } from "./db.js";
 import type { SourceItem } from "./sources.js";
 
+export function buildOnboardingResponse(intent: ClassifiedIntent): string {
+  const topics = intent.extracted_topics && intent.extracted_topics.length > 0
+    ? intent.extracted_topics.join(", ")
+    : "all tech";
+
+  return `Got it — I'll focus on ${topics}. If you want to change this later, just tell me your interests.
+
+What would you like to know about today?`;
+}
+
 // ─── System prompt (Section 7.1) ─────────────────────────────────────────────
 
 function buildSystemPrompt(user: UserProfile, recentHistory: ConversationTurn[]): string {
@@ -125,6 +135,11 @@ export async function generateResponse(
   sourceItems: SourceItem[],
   savedIdeas?: string[]
 ): Promise<string> {
+  // Handle onboarding intent separately
+  if (intent.intent === "onboarding") {
+    return buildOnboardingResponse(intent);
+  }
+
   const system = buildSystemPrompt(user, recentHistory);
   const userTurn = buildUserTurn(intent, sourceItems, savedIdeas);
 
