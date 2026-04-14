@@ -147,6 +147,12 @@ export function getOrCreateUser(phoneId: string): UserProfile {
   return rowToProfile(row);
 }
 
+/** Check if this is a new user (no conversation history yet). */
+export function isNewUser(phoneId: string): boolean {
+  const row = stmts.getRecentConvo.get({ $phoneId: phoneId, $limit: 1 }) as ConversationTurn | null;
+  return row === null;
+}
+
 export function updateUserLastActive(phoneId: string): void {
   stmts.updateLastActive.run({ $phoneId: phoneId });
 }
