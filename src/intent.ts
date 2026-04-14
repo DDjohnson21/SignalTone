@@ -107,19 +107,18 @@ export async function classifyIntent(
 /** Simple heuristic fallback if the LLM call fails. */
 function fallback(text: string): ClassifiedIntent {
   const t = text.toLowerCase();
-  const base = { modifiers: [] as string[], references_previous: false, extracted_topics: [] as string[] };
-  if (t.includes("morning") || t.includes("good morning")) return { intent: "daily_briefing", ...base };
-  if (t.includes("night") || t.includes("evening")) return { intent: "evening_summary", ...base };
-  if (t === "build?" || t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea", ...base };
-  if (t === "whats new" || t === "whats new?") return { intent: "topic_query", ...base };
-  if (t.includes("save") || t.includes("bookmark")) return { intent: "save", ...base };
-  if (t.includes("saved") || t.includes("recall") || t.includes("my ideas")) return { intent: "recall", ...base };
-  if (t.includes("remind")) return { intent: "reminder", ...base };
+  if (t.includes("morning") || t.includes("good morning")) return { intent: "daily_briefing", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
+  if (t.includes("night") || t.includes("evening")) return { intent: "evening_summary", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
+  if (t === "build?" || t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
+  if (t === "whats new" || t === "whats new?") return { intent: "topic_query", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
+  if (t.includes("save") || t.includes("bookmark")) return { intent: "save", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
+  if (t.includes("saved") || t.includes("recall") || t.includes("my ideas")) return { intent: "recall", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
+  if (t.includes("remind")) return { intent: "reminder", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
   // Onboarding fallback: if user mentions tech topics, extract them
   const topicKeywords = ["ai", "devtools", "crypto", "cybersecurity", "mobile", "cloud", "web3", "machine learning", "software"];
   const foundTopics = topicKeywords.filter((kw) => t.includes(kw));
   if (foundTopics.length > 0) {
-    return { intent: "onboarding", modifiers: [], references_previous: false, extracted_topics: foundTopics };
+    return { intent: "onboarding", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: foundTopics };
   }
-  return { intent: "daily_briefing", ...base };
+  return { intent: "daily_briefing", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
 }
