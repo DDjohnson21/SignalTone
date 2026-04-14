@@ -29,7 +29,8 @@ Rules:
 - Have a point of view. Say what most people are missing.
 - Keep responses under 200 words unless the user asks for more.
 - Use plain conversational language, not bullet headers.
-- This is iMessage. Keep it tight. No one reads essays in a text thread.`;
+- This is iMessage. Keep it tight. No one reads essays in a text thread.
+- Never include URLs, links, or domain names (e.g. z.ai, arxiv.org) in your response. They create separate preview bubbles in iMessage. Refer to sources by name only.`;
 }
 
 // ─── Per-intent user turn ─────────────────────────────────────────────────────
@@ -107,24 +108,12 @@ Confirm the change in 1–2 sentences. Acknowledge you'll adjust future response
       return `The user asked to see their saved ideas, but they have none yet. Let them know and suggest saying "save this" after any response they want to keep.`;
     }
 
+    case "reminder":
+      return `The user set a reminder with time: "${intent.time_expression ?? "later"}". Confirm it in one conversational sentence. Example: "Got it — I'll ping you in 2 hours." Don't add anything else.`;
+
     default:
       return `Give a quick tech briefing based on:\n${src}`;
   }
-}
-
-// ─── Link footer ─────────────────────────────────────────────────────────────
-
-function buildLinkFooter(intent: ClassifiedIntent, items: SourceItem[]): string {
-  // Intents that don't benefit from source links
-  if (["save", "recall", "preference_update", "follow_up"].includes(intent.intent)) return "";
-
-  const links = items
-    .slice(0, 3)
-    .filter((item) => item.url)
-    .map((item) => `• ${item.title.slice(0, 60)}${item.title.length > 60 ? "…" : ""}\n  ${item.url}`)
-    .join("\n");
-
-  return links ? `\n\n---\nRead more:\n${links}` : "";
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -142,5 +131,16 @@ export async function generateResponse(
   const text = await callChat(system, userTurn, 1024);
   if (!text) return "Something went wrong generating a response. Try again?";
 
-  return text + buildLinkFooter(intent, sourceItems);
+  // Strip all URLs and bare domains — iOS generates a separate link preview bubble
+  // for anything it recognises as a link, turning one message into multiple.
+  return text
+    .replace(/https?:\/\/\S+/g, "")                        // full URLs
+    .replace(/\b\w[\w-]*\.\w{2,}(?:\/\S*)?\b/g, (match) => {
+      // Only strip if it looks like a real domain (has a dot with a known-ish TLD)
+      // Avoids stripping normal words that happen to contain dots (e.g. "e.g.")
+      const tlds = /\.(ai|io|com|org|net|dev|app|co|gov|edu|uk|so|xyz|sh)(?:\/|$)/i;
+      return tlds.test(match) ? "" : match;
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }

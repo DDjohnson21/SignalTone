@@ -11,7 +11,8 @@ export type IntentType =
   | "follow_up"
   | "preference_update"
   | "save"
-  | "recall";
+  | "recall"
+  | "reminder";
 
 export interface ClassifiedIntent {
   intent: IntentType;
@@ -20,6 +21,7 @@ export interface ClassifiedIntent {
   references_previous?: boolean;
   preference_key?: string;
   preference_value?: string;
+  time_expression?: string;
 }
 
 // ─── JSON schema for structured output ───────────────────────────────────────
@@ -38,15 +40,18 @@ const INTENT_SCHEMA: Record<string, unknown> = {
         "preference_update",
         "save",
         "recall",
+        "reminder",
       ],
     },
-    topic: { type: "string" },
-    modifiers: { type: "array", items: { type: "string" } },
-    references_previous: { type: "boolean" },
-    preference_key: { type: "string" },
-    preference_value: { type: "string" },
+    topic:               { type: ["string", "null"] },
+    modifiers:           { type: ["array", "null"], items: { type: "string" } },
+    references_previous: { type: ["boolean", "null"] },
+    preference_key:      { type: ["string", "null"] },
+    preference_value:    { type: ["string", "null"] },
+    time_expression:     { type: ["string", "null"] },
   },
-  required: ["intent"],
+  // OpenAI strict mode requires all properties in required; use ["type","null"] for optional fields.
+  required: ["intent", "topic", "modifiers", "references_previous", "preference_key", "preference_value", "time_expression"],
   additionalProperties: false,
 };
 
@@ -55,14 +60,16 @@ const CLASSIFICATION_SYSTEM = `Classify incoming iMessage text into exactly one 
 Intent definitions:
 - daily_briefing: morning greetings, "what should I know today?", "good morning", "what's up today?"
 - evening_summary: "good night", "wrap up today", "what happened today?", "evening update"
-- topic_query: asking about a specific tech domain ("anything new in AI?", "what's happening in crypto?", "show me devtools news")
-- build_idea: asking for project/startup ideas ("what should I build?", "give me startup ideas", "what can I build this weekend?")
+- topic_query: asking about a specific tech domain ("anything new in AI?", "what's happening in crypto?", "show me devtools news", "whats new", "whats new?")
+- build_idea: asking for project/startup ideas ("what should I build?", "give me startup ideas", "what can I build this weekend?", "build?")
 - follow_up: refining or expanding the immediately previous response ("make that more technical", "turn that into a startup idea", "give me more detail", "simplify that")
 - preference_update: user is changing their profile ("I'm interested in devtools", "keep it brief", "I'm a senior engineer", "focus on AI stuff")
 - save: saving the last response/idea ("save this", "bookmark that", "save that idea")
 - recall: retrieving saved items ("what did I save?", "show me my ideas", "my saved ideas")
+- reminder: user wants a reminder in the future ("remind me in 2 hours", "remind me at 5pm", "send me this tonight")
 
 For topic_query, extract the topic (e.g., "AI", "crypto", "devtools", "web3").
+For reminder, extract time_expression (e.g. "2 hours", "5pm", "tonight").
 For preference_update, extract preference_key (topics|skill_level|response_style) and preference_value.
 For follow_up or build_idea with refinements, set references_previous: true.
 For modifiers: capture words like "brief", "technical", "simple", "detailed", "startup", "weekend", "quick".`;
@@ -96,8 +103,10 @@ function fallback(text: string): ClassifiedIntent {
   const t = text.toLowerCase();
   if (t.includes("morning") || t.includes("good morning")) return { intent: "daily_briefing" };
   if (t.includes("night") || t.includes("evening")) return { intent: "evening_summary" };
-  if (t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea" };
+  if (t === "build?" || t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea" };
+  if (t === "whats new" || t === "whats new?") return { intent: "topic_query" };
   if (t.includes("save") || t.includes("bookmark")) return { intent: "save" };
   if (t.includes("saved") || t.includes("recall") || t.includes("my ideas")) return { intent: "recall" };
+  if (t.includes("remind")) return { intent: "reminder" };
   return { intent: "daily_briefing" };
 }

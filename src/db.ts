@@ -49,6 +49,21 @@ db.run(`
   )
 `);
 
+try {
+  db.run("ALTER TABLE users ADD COLUMN topic_affinity TEXT DEFAULT '{}'");
+} catch {
+  // Column already exists — ignore
+}
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS briefing_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone_id       TEXT REFERENCES users(phone_id),
+    briefing_type  TEXT,
+    sent_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface UserProfile {
@@ -104,17 +119,23 @@ function rowToProfile(row: UserRow): UserProfile {
 // ─── Prepared statements ──────────────────────────────────────────────────────
 
 const stmts = {
-  getUser:             db.prepare("SELECT * FROM users WHERE phone_id = $phoneId"),
-  insertUser:          db.prepare("INSERT OR IGNORE INTO users (phone_id) VALUES ($phoneId)"),
-  updateLastActive:    db.prepare("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE phone_id = $phoneId"),
-  updateTopics:        db.prepare("UPDATE users SET topics = $topics WHERE phone_id = $phoneId"),
-  updateSkillLevel:    db.prepare("UPDATE users SET skill_level = $val WHERE phone_id = $phoneId"),
-  updateResponseStyle: db.prepare("UPDATE users SET response_style = $val WHERE phone_id = $phoneId"),
-  insertConversation:  db.prepare("INSERT INTO conversations (phone_id, role, content, intent) VALUES ($phoneId, $role, $content, $intent)"),
-  getRecentConvo:      db.prepare("SELECT * FROM conversations WHERE phone_id = $phoneId ORDER BY created_at DESC LIMIT $limit"),
-  insertSavedIdea:     db.prepare("INSERT INTO saved_ideas (phone_id, idea_text, source_update) VALUES ($phoneId, $ideaText, $sourceUpdate)"),
-  getSavedIdeas:       db.prepare("SELECT * FROM saved_ideas WHERE phone_id = $phoneId ORDER BY created_at DESC"),
-  logSentUpdate:       db.prepare("INSERT INTO sent_updates (phone_id, source_url, topic) VALUES ($phoneId, $sourceUrl, $topic)"),
+  getUser:               db.prepare("SELECT * FROM users WHERE phone_id = $phoneId"),
+  insertUser:            db.prepare("INSERT OR IGNORE INTO users (phone_id) VALUES ($phoneId)"),
+  updateLastActive:      db.prepare("UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE phone_id = $phoneId"),
+  updateTopics:          db.prepare("UPDATE users SET topics = $topics WHERE phone_id = $phoneId"),
+  updateSkillLevel:      db.prepare("UPDATE users SET skill_level = $val WHERE phone_id = $phoneId"),
+  updateResponseStyle:   db.prepare("UPDATE users SET response_style = $val WHERE phone_id = $phoneId"),
+  insertConversation:    db.prepare("INSERT INTO conversations (phone_id, role, content, intent) VALUES ($phoneId, $role, $content, $intent)"),
+  getRecentConvo:        db.prepare("SELECT * FROM conversations WHERE phone_id = $phoneId ORDER BY created_at DESC LIMIT $limit"),
+  insertSavedIdea:       db.prepare("INSERT INTO saved_ideas (phone_id, idea_text, source_update) VALUES ($phoneId, $ideaText, $sourceUpdate)"),
+  getSavedIdeas:         db.prepare("SELECT * FROM saved_ideas WHERE phone_id = $phoneId ORDER BY created_at DESC"),
+  logSentUpdate:         db.prepare("INSERT INTO sent_updates (phone_id, source_url, topic) VALUES ($phoneId, $sourceUrl, $topic)"),
+  getRecentSentUrlsStmt: db.prepare("SELECT source_url FROM sent_updates WHERE phone_id = $phoneId AND sent_at > datetime('now', $interval)"),
+  getAllUserIdsStmt:      db.prepare("SELECT phone_id FROM users"),
+  getTopicAffinityStmt:  db.prepare("SELECT topic_affinity FROM users WHERE phone_id = $phoneId"),
+  bumpTopicAffinityStmt: db.prepare("UPDATE users SET topic_affinity = $aff WHERE phone_id = $phoneId"),
+  alreadySentTodayStmt:  db.prepare("SELECT 1 FROM briefing_log WHERE phone_id = $phoneId AND briefing_type = $type AND date(sent_at) = date('now')"),
+  recordBriefingStmt:    db.prepare("INSERT INTO briefing_log (phone_id, briefing_type) VALUES ($phoneId, $type)"),
 };
 
 // ─── API ─────────────────────────────────────────────────────────────────────
@@ -172,6 +193,56 @@ export function getSavedIdeas(phoneId: string): SavedIdea[] {
 
 export function logSentUpdate(phoneId: string, sourceUrl: string, topic?: string): void {
   stmts.logSentUpdate.run({ $phoneId: phoneId, $sourceUrl: sourceUrl, $topic: topic ?? null });
+}
+
+export function getRecentSentUrls(phoneId: string, hours = 48): Set<string> {
+  const interval = `-${hours} hours`;
+  const rows = stmts.getRecentSentUrlsStmt.all({ $phoneId: phoneId, $interval: interval }) as Array<{ source_url: string }>;
+  return new Set(rows.map((r) => r.source_url));
+}
+
+export function getRecentSentTopics(phoneId: string, hours = 48): Map<string, number> {
+  const interval = `-${hours} hours`;
+  const rows = stmts.getRecentSentUrlsStmt.all({ $phoneId: phoneId, $interval: interval }) as Array<{ source_url: string; topic: string | null }>;
+  const topicCounts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.topic) {
+      const key = row.topic.toLowerCase();
+      topicCounts.set(key, (topicCounts.get(key) ?? 0) + 1);
+    }
+  }
+  return topicCounts;
+}
+
+export function getAllUserIds(): string[] {
+  const rows = stmts.getAllUserIdsStmt.all() as Array<{ phone_id: string }>;
+  return rows.map((r) => r.phone_id);
+}
+
+export function getTopicAffinity(phoneId: string): Record<string, number> {
+  const row = stmts.getTopicAffinityStmt.get({ $phoneId: phoneId }) as { topic_affinity: string } | null;
+  if (!row) return {};
+  try {
+    return JSON.parse(row.topic_affinity) as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+
+export function bumpTopicAffinity(phoneId: string, topic: string): void {
+  const current = getTopicAffinity(phoneId);
+  const key = topic.toLowerCase();
+  current[key] = (current[key] ?? 0) + 1;
+  stmts.bumpTopicAffinityStmt.run({ $aff: JSON.stringify(current), $phoneId: phoneId });
+}
+
+export function alreadySentToday(phoneId: string, type: "morning" | "evening"): boolean {
+  const row = stmts.alreadySentTodayStmt.get({ $phoneId: phoneId, $type: type });
+  return row !== null && row !== undefined;
+}
+
+export function recordBriefingLog(phoneId: string, type: "morning" | "evening"): void {
+  stmts.recordBriefingStmt.run({ $phoneId: phoneId, $type: type });
 }
 
 export { db };

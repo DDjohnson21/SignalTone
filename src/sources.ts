@@ -11,7 +11,7 @@ export interface SourceItem {
   title: string;
   url: string;
   score: number;
-  source: "hackernews" | "github_trending";
+  source: "hackernews" | "github_trending" | "arxiv" | "rss";
   topic?: string;
   publishedAt: Date;
 }
@@ -28,8 +28,27 @@ const cache = new Map<string, CacheEntry>();
 
 // ─── Hacker News ─────────────────────────────────────────────────────────────
 
-const HN_MIN_SCORE = 50; // filter low-signal stories
-const HN_FETCH_COUNT = 20; // how many top stories to fetch
+const HN_MIN_SCORE = 50;  // filter low-signal stories
+const HN_FETCH_COUNT = 30; // fetch extra to account for dead links
+
+// ─── URL validation ───────────────────────────────────────────────────────────
+
+/** HEAD → GET fallback. Returns false on timeout, network error, or 4xx/5xx. */
+async function validateUrl(url: string): Promise<boolean> {
+  for (const method of ["HEAD", "GET"] as const) {
+    try {
+      const res = await fetch(url, {
+        method,
+        signal: AbortSignal.timeout(5000),
+        redirect: "follow",
+      });
+      if (res.status !== 405) return res.status < 400;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 interface HNItem {
   id: number;
@@ -62,21 +81,35 @@ async function fetchHackerNews(): Promise<SourceItem[]> {
     })
   );
 
-  return stories
-    .filter(
-      (s): s is HNItem =>
-        s !== null &&
-        s.type === "story" &&
-        s.score >= HN_MIN_SCORE &&
-        Boolean(s.url || s.id)
-    )
-    .map((s) => ({
-      title: s.title,
-      url: s.url ?? `https://news.ycombinator.com/item?id=${s.id}`,
-      score: s.score,
-      source: "hackernews" as const,
-      publishedAt: new Date(s.time * 1000),
-    }));
+  const valid = stories.filter(
+    (s): s is HNItem =>
+      s !== null &&
+      s.type === "story" &&
+      s.score >= HN_MIN_SCORE &&
+      Boolean(s.url || s.id)
+  );
+
+  // Validate external URLs in parallel; fall back to HN comments page for dead links
+  return Promise.all(
+    valid.map(async (s) => {
+      const hnFallback = `https://news.ycombinator.com/item?id=${s.id}`;
+      let url = hnFallback;
+
+      if (s.url) {
+        const ok = await validateUrl(s.url);
+        url = ok ? s.url : hnFallback;
+        if (!ok) console.log(`[Sources] Dead link replaced with HN fallback: ${s.url}`);
+      }
+
+      return {
+        title: s.title,
+        url,
+        score: s.score,
+        source: "hackernews" as const,
+        publishedAt: new Date(s.time * 1000),
+      };
+    })
+  );
 }
 
 // ─── GitHub Trending (via Search API) ────────────────────────────────────────
@@ -127,6 +160,109 @@ async function fetchGitHubTrending(): Promise<SourceItem[]> {
   }));
 }
 
+// ─── ArXiv ───────────────────────────────────────────────────────────────────
+
+async function fetchArxiv(): Promise<SourceItem[]> {
+  try {
+    const res = await fetch(
+      "https://export.arxiv.org/api/query?search_query=cat:cs.AI+OR+cat:cs.CL+OR+cat:cs.SE&sortBy=submittedDate&sortOrder=descending&max_results=8",
+      { signal: AbortSignal.timeout(10000) }
+    );
+    if (!res.ok) return [];
+    const xml = await res.text();
+
+    const entries: SourceItem[] = [];
+    const entryPattern = /<entry>([\s\S]*?)<\/entry>/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = entryPattern.exec(xml)) !== null) {
+      const block = match[1];
+
+      const titleMatch = /<title>([\s\S]*?)<\/title>/.exec(block);
+      const idMatch = /<id>([\s\S]*?)<\/id>/.exec(block);
+      const publishedMatch = /<published>([\s\S]*?)<\/published>/.exec(block);
+
+      const title = titleMatch ? titleMatch[1].trim() : null;
+      const url = idMatch ? idMatch[1].trim() : null;
+      const published = publishedMatch ? publishedMatch[1].trim() : null;
+
+      if (!title || !url) continue;
+
+      entries.push({
+        title,
+        url,
+        score: 120,
+        source: "arxiv",
+        topic: "ai",
+        publishedAt: published ? new Date(published) : new Date(),
+      });
+    }
+
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+// ─── RSS ─────────────────────────────────────────────────────────────────────
+
+const RSS_FEEDS: Array<{ url: string; topic?: string }> = [
+  { url: "https://simonwillison.net/atom/everything/", topic: "ai" },
+  { url: "https://techcrunch.com/feed/", topic: undefined },
+  { url: "https://www.theverge.com/rss/index.xml", topic: undefined },
+];
+
+async function fetchRSS(feedUrl: string, topic?: string): Promise<SourceItem[]> {
+  try {
+    const res = await fetch(feedUrl, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return [];
+    const xml = await res.text();
+
+    const items: SourceItem[] = [];
+
+    // Match <item> or <entry> blocks
+    const blockPattern = /<(?:item|entry)>([\s\S]*?)<\/(?:item|entry)>/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = blockPattern.exec(xml)) !== null && items.length < 5) {
+      const block = match[1];
+
+      // Extract title — handle CDATA
+      const titleMatch = /<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/.exec(block);
+      const title = titleMatch ? titleMatch[1].trim() : null;
+
+      // Extract link — handle plain <link> or atom <link href="..."/>
+      let url: string | null = null;
+      const hrefMatch = /<link[^>]+href="([^"]+)"/.exec(block);
+      if (hrefMatch) {
+        url = hrefMatch[1].trim();
+      } else {
+        const linkMatch = /<link>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/link>/.exec(block);
+        if (linkMatch) url = linkMatch[1].trim();
+      }
+
+      // Extract pubDate or published
+      const dateMatch = /<(?:pubDate|published)>([\s\S]*?)<\/(?:pubDate|published)>/.exec(block);
+      const published = dateMatch ? dateMatch[1].trim() : null;
+
+      if (!title || !url) continue;
+
+      items.push({
+        title,
+        url,
+        score: 70,
+        source: "rss",
+        topic,
+        publishedAt: published ? new Date(published) : new Date(),
+      });
+    }
+
+    return items;
+  } catch {
+    return [];
+  }
+}
+
 // ─── Scoring ─────────────────────────────────────────────────────────────────
 
 /** Exponential recency decay with a 12-hour half-life, as per Section 6.2. */
@@ -136,8 +272,34 @@ function recencyScore(publishedAt: Date): number {
   return Math.exp((-Math.LN2 * ageMs) / halfLifeMs);
 }
 
-function rank(items: SourceItem[]): SourceItem[] {
-  return [...items].sort((a, b) => recencyScore(b.publishedAt) - recencyScore(a.publishedAt));
+/** Novelty penalty: reduces score for topics the user has seen recently.
+ * Each recent topic occurrence reduces the score by 15% (up to 80% max penalty). */
+function noveltyPenalty(item: SourceItem, recentTopics: Map<string, number>): number {
+  if (!item.topic || recentTopics.size === 0) return 1;
+
+  const key = item.topic.toLowerCase();
+  const count = recentTopics.get(key) ?? 0;
+  if (count === 0) return 1;
+
+  const penaltyPerOccurrence = 0.15;
+  const maxPenalty = 0.8;
+  const totalPenalty = Math.min(count * penaltyPerOccurrence, maxPenalty);
+
+  return 1 - totalPenalty;
+}
+
+function rank(items: SourceItem[], recentTopics?: Map<string, number>): SourceItem[] {
+  return [...items].sort((a, b) => {
+    const aRecency = recencyScore(a.publishedAt);
+    const bRecency = recencyScore(b.publishedAt);
+    const aNovelty = noveltyPenalty(a, recentTopics ?? new Map());
+    const bNovelty = noveltyPenalty(b, recentTopics ?? new Map());
+
+    const aScore = aRecency * aNovelty;
+    const bScore = bRecency * bNovelty;
+
+    return bScore - aScore;
+  });
 }
 
 // ─── Topic filtering ─────────────────────────────────────────────────────────
@@ -168,11 +330,13 @@ function matchesTopic(item: SourceItem, topic: string): boolean {
 /**
  * Returns up to `limit` ranked source items.
  * Raw fetch results are cached per TTL and shared across all callers.
- * Topic filtering is applied post-cache so the fetch is not per-user.
+ * Topic filtering and seenUrls dedup are applied post-cache so the fetch is not per-user.
  */
 export async function getTopItems(
   topicFilter?: string,
-  limit = 8
+  limit = 8,
+  seenUrls?: Set<string>,
+  recentTopics?: Map<string, number>
 ): Promise<SourceItem[]> {
   const cacheKey = "raw";
   const cached = cache.get(cacheKey);
@@ -182,7 +346,7 @@ export async function getTopItems(
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
     allItems = cached.items;
   } else {
-    const [hn, gh] = await Promise.all([
+    const [hn, gh, arxiv, ...rssResults] = await Promise.all([
       fetchHackerNews().catch((e) => {
         console.warn("HN fetch failed:", e);
         return [] as SourceItem[];
@@ -191,20 +355,51 @@ export async function getTopItems(
         console.warn("GitHub fetch failed:", e);
         return [] as SourceItem[];
       }),
+      fetchArxiv().catch((e) => {
+        console.warn("ArXiv fetch failed:", e);
+        return [] as SourceItem[];
+      }),
+      ...RSS_FEEDS.map((f) =>
+        fetchRSS(f.url, f.topic).catch((e) => {
+          console.warn(`RSS fetch failed (${f.url}):`, e);
+          return [] as SourceItem[];
+        })
+      ),
     ]);
 
-    allItems = rank([...hn, ...gh]);
+    const rssItems = rssResults.flat();
+    allItems = rank([...hn, ...gh, ...arxiv, ...rssItems], recentTopics);
     cache.set(cacheKey, { items: allItems, fetchedAt: Date.now() });
-    console.log(`Source cache refreshed: ${hn.length} HN + ${gh.length} GH items`);
+    console.log(
+      `Source cache refreshed: ${hn.length} HN + ${gh.length} GH + ${arxiv.length} ArXiv + ${rssItems.length} RSS items`
+    );
   }
+
+  let filtered = allItems;
 
   if (topicFilter) {
-    const filtered = allItems.filter((item) => matchesTopic(item, topicFilter));
+    const topicFiltered = allItems.filter((item) => matchesTopic(item, topicFilter));
     // If nothing matched the topic, fall back to top items so we never return empty
-    return (filtered.length > 0 ? filtered : allItems).slice(0, limit);
+    filtered = topicFiltered.length > 0 ? topicFiltered : allItems;
   }
 
-  return allItems.slice(0, limit);
+  if (seenUrls && seenUrls.size > 0) {
+    filtered = filtered.filter((item) => !seenUrls.has(item.url));
+  }
+
+  // Apply topic novelty re-ranking if recent topics are provided
+  // This is done post-cache so it's user-specific
+  if (recentTopics && recentTopics.size > 0) {
+    filtered = rank(filtered, recentTopics);
+    const penalizedTopics = [...recentTopics.entries()]
+      .filter(([_, count]) => count > 0)
+      .slice(0, 3)
+      .map(([t, c]) => `${t}(${c})`)
+      .join(", ");
+    console.log(`[Sources] Topic novelty applied: ${penalizedTopics}`);
+  }
+
+  return filtered.slice(0, limit);
 }
 
 /** Manually expire the cache (useful for testing). */
