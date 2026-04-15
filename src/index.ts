@@ -28,8 +28,11 @@ process.on("SIGINT", () => process.exit(0));
 process.on("SIGTERM", () => process.exit(0));
 import { classifyIntent } from "./intent.js";
 import { getTopItems } from "./sources.js";
-import { generateResponse, buildOnboardingResponse } from "./response.js";
+import { generateResponse, buildOnboardingResponse, stripUrls } from "./response.js";
 import { startBriefingScheduler } from "./scheduler.js";
+import { runCommittee } from "./committee.js";
+import { buildOpportunity } from "./builder.js";
+import { hasGitHubToken } from "./github.js";
 import {
   getOrCreateUser,
   updateUserLastActive,
@@ -44,7 +47,11 @@ import {
   logSentUpdate,
   getRecentSentTopics,
   isNewUser,
+  saveOpportunity,
+  getLastOpportunity,
+  getRepositories,
 } from "./db.js";
+import type { CommitteeOutput } from "./committee.js";
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
@@ -68,6 +75,32 @@ const reminders = new Reminders(sdk);
 startBriefingScheduler(sdk);
 
 console.log("SignalTone starting — waiting for iMessages...");
+
+// ─── Async build runner (fires after handleMessage returns) ──────────────────
+
+async function runBuildAsync(
+  sender: string,
+  opportunity: CommitteeOutput,
+  opportunityDbId: number | null
+): Promise<void> {
+  try {
+    const result = await buildOpportunity(sender, opportunity, opportunityDbId);
+    const summary =
+      `Scaffolded ${result.repoFullName}. ` +
+      `${result.issueCount} issues seeded. ` +
+      (result.prUrl ? "Draft PR is open." : "") +
+      "\n\n" +
+      opportunity.editor_reply;
+    // Repo URL is intentionally included — it's the point of the message.
+    await sdk.send(sender, summary.trim());
+    addConversationTurn(sender, "agent", summary, "build_this");
+  } catch (err) {
+    console.error("[Build] Failed:", err);
+    const errMsg = "Build failed — check your GITHUB_TOKEN or try again.";
+    await sdk.send(sender, errMsg);
+    addConversationTurn(sender, "agent", errMsg, "build_this");
+  }
+}
 
 // ─── Concurrency guard ───────────────────────────────────────────────────────
 
@@ -156,6 +189,8 @@ async function handleMessage(sender: string, text: string): Promise<void> {
     "evening_summary",
     "topic_query",
     "build_idea",
+    "opportunity_query",
+    "build_this",
   ].includes(intent.intent);
 
   // Skip sources for onboarding responses
@@ -194,6 +229,172 @@ async function handleMessage(sender: string, text: string): Promise<void> {
 
   // 7. Re-fetch user (may have been updated by preference step)
   const freshUser = getOrCreateUser(sender);
+
+  // ── Opportunity Committee intents ──────────────────────────────────────────
+
+  if (intent.intent === "opportunity_query") {
+    const committee = await runCommittee(sourceItems, freshUser, intent.topic ?? undefined);
+    if (!committee) {
+      const fallback = "Couldn't run the committee right now. Try again in a moment.";
+      await sdk.send(sender, fallback);
+      addConversationTurn(sender, "user", text, intent.intent);
+      addConversationTurn(sender, "agent", fallback, intent.intent);
+      return;
+    }
+
+    const opportunityDbId = saveOpportunity(sender, {
+      signal: committee.signal,
+      why_now: committee.why_now,
+      best_use_case: committee.best_use_case,
+      project_type: committee.project_type,
+      verdict: committee.verdict,
+      risk: committee.risk,
+      repo_name: committee.first_repo.name,
+      repo_goal: committee.first_repo.goal,
+      editor_reply: committee.editor_reply,
+    });
+    console.log(`[${sender}] Saved opportunity #${opportunityDbId}: ${committee.verdict}`);
+
+    const reply = stripUrls(committee.editor_reply);
+    agentSent.add(reply);
+    setTimeout(() => agentSent.delete(reply), 30_000);
+    await sdk.send(sender, reply);
+    addConversationTurn(sender, "user", text, intent.intent);
+    addConversationTurn(sender, "agent", reply, intent.intent);
+    console.log(`[${sender}] responded in ${Date.now() - t0}ms`);
+    return;
+  }
+
+  if (intent.intent === "build_this") {
+    if (!hasGitHubToken()) {
+      const noToken = "Set GITHUB_TOKEN in your .env to enable repo scaffolding.";
+      await sdk.send(sender, noToken);
+      addConversationTurn(sender, "user", text, intent.intent);
+      addConversationTurn(sender, "agent", noToken, intent.intent);
+      return;
+    }
+
+    // Use the most recent opportunity if it was saved in the last 30 minutes,
+    // otherwise run the committee fresh.
+    let committee: CommitteeOutput | null = null;
+    let opportunityDbId: number | null = null;
+
+    const lastOpp = getLastOpportunity(sender);
+    const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000);
+    if (lastOpp && new Date(lastOpp.created_at) > thirtyMinAgo) {
+      committee = {
+        signal: lastOpp.signal,
+        why_now: lastOpp.why_now,
+        best_use_case: lastOpp.best_use_case,
+        project_type: lastOpp.project_type as CommitteeOutput["project_type"],
+        verdict: lastOpp.verdict as CommitteeOutput["verdict"],
+        risk: lastOpp.risk,
+        first_repo: {
+          name: lastOpp.repo_name ?? "new-project",
+          goal: lastOpp.repo_goal ?? "Build something useful",
+          description: lastOpp.best_use_case,
+          tech_stack: ["TypeScript"],
+        },
+        editor_reply: lastOpp.editor_reply,
+      };
+      opportunityDbId = lastOpp.id;
+    } else {
+      committee = await runCommittee(sourceItems, freshUser, intent.topic ?? undefined);
+      if (committee) {
+        opportunityDbId = saveOpportunity(sender, {
+          signal: committee.signal,
+          why_now: committee.why_now,
+          best_use_case: committee.best_use_case,
+          project_type: committee.project_type,
+          verdict: committee.verdict,
+          risk: committee.risk,
+          repo_name: committee.first_repo.name,
+          repo_goal: committee.first_repo.goal,
+          editor_reply: committee.editor_reply,
+        });
+      }
+    }
+
+    if (!committee) {
+      const fallback = "Couldn't find a strong build opportunity right now. Ask for an opportunity first.";
+      await sdk.send(sender, fallback);
+      addConversationTurn(sender, "user", text, intent.intent);
+      addConversationTurn(sender, "agent", fallback, intent.intent);
+      return;
+    }
+
+    const ack = `On it — scaffolding ${committee.first_repo.name}. I'll text you when it's ready.`;
+    agentSent.add(ack);
+    setTimeout(() => agentSent.delete(ack), 30_000);
+    await sdk.send(sender, ack);
+    addConversationTurn(sender, "user", text, intent.intent);
+    addConversationTurn(sender, "agent", ack, intent.intent);
+
+    // Fire the build — do not await so the inProgress lock is released.
+    const committeeSnapshot = committee;
+    const oppIdSnapshot = opportunityDbId;
+    void runBuildAsync(sender, committeeSnapshot, oppIdSnapshot);
+
+    console.log(`[${sender}] Build started for ${committee.first_repo.name}`);
+    return;
+  }
+
+  if (intent.intent === "repo_status") {
+    const repos = getRepositories(sender);
+    let reply: string;
+    if (repos.length === 0) {
+      reply = "Nothing scaffolded yet. Ask for an opportunity and say \"build it\" to create your first repo.";
+    } else {
+      const list = repos
+        .slice(0, 5)
+        .map((r, i) => `${i + 1}. ${r.repo_name} — ${r.repo_url}`)
+        .join("\n");
+      reply = `Repos scaffolded (${repos.length}):\n${list}`;
+    }
+    agentSent.add(reply);
+    setTimeout(() => agentSent.delete(reply), 30_000);
+    await sdk.send(sender, reply);
+    addConversationTurn(sender, "user", text, intent.intent);
+    addConversationTurn(sender, "agent", reply, intent.intent);
+    console.log(`[${sender}] responded in ${Date.now() - t0}ms`);
+    return;
+  }
+
+  if (intent.intent === "refine_build") {
+    const repos = getRepositories(sender);
+    if (repos.length === 0) {
+      const noRepo = "No repos yet. Build something first — say \"build it\" after seeing an opportunity.";
+      await sdk.send(sender, noRepo);
+      addConversationTurn(sender, "user", text, intent.intent);
+      addConversationTurn(sender, "agent", noRepo, intent.intent);
+      return;
+    }
+    const latestRepo = repos[0];
+    // Treat as a follow_up with repo context injected into the prompt
+    const refinedIntent = { ...intent, intent: "follow_up" as const };
+    const refinedHistory = [
+      ...history,
+      {
+        id: -1,
+        phone_id: sender,
+        role: "agent",
+        content: `Current repo: ${latestRepo.repo_name} (${latestRepo.repo_url})`,
+        intent: "repo_status",
+        created_at: new Date().toISOString(),
+      },
+    ];
+    const response = await generateResponse(refinedIntent, freshUser, refinedHistory, sourceItems);
+    const cleaned = stripUrls(response);
+    agentSent.add(cleaned);
+    setTimeout(() => agentSent.delete(cleaned), 30_000);
+    await sdk.send(sender, cleaned);
+    addConversationTurn(sender, "user", text, intent.intent);
+    addConversationTurn(sender, "agent", cleaned, intent.intent);
+    console.log(`[${sender}] responded in ${Date.now() - t0}ms`);
+    return;
+  }
+
+  // ── Standard response path ─────────────────────────────────────────────────
 
   // 8. Generate response
   const response = await generateResponse(
