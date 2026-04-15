@@ -55,12 +55,63 @@ try {
   // Column already exists — ignore
 }
 
+try {
+  db.run("ALTER TABLE users ADD COLUMN build_preferences TEXT DEFAULT NULL");
+} catch {
+  // Column already exists — ignore
+}
+
 db.run(`
   CREATE TABLE IF NOT EXISTS briefing_log (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     phone_id       TEXT REFERENCES users(phone_id),
     briefing_type  TEXT,
     sent_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS opportunities (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone_id          TEXT REFERENCES users(phone_id),
+    signal            TEXT,
+    why_now           TEXT,
+    best_use_case     TEXT,
+    project_type      TEXT,
+    verdict           TEXT,
+    risk              TEXT,
+    repo_name         TEXT,
+    repo_goal         TEXT,
+    editor_reply      TEXT,
+    status            TEXT DEFAULT 'identified',
+    created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS repositories (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone_id        TEXT REFERENCES users(phone_id),
+    opportunity_id  INTEGER REFERENCES opportunities(id),
+    repo_name       TEXT,
+    repo_url        TEXT,
+    full_name       TEXT,
+    default_branch  TEXT DEFAULT 'main',
+    status          TEXT DEFAULT 'draft',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS build_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    repository_id INTEGER REFERENCES repositories(id),
+    run_type      TEXT,
+    summary       TEXT,
+    commit_sha    TEXT,
+    pr_url        TEXT,
+    status        TEXT,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
 
@@ -89,6 +140,45 @@ export interface SavedIdea {
   phone_id: string;
   idea_text: string;
   source_update: string | null;
+  created_at: string;
+}
+
+export interface Opportunity {
+  id: number;
+  phone_id: string;
+  signal: string;
+  why_now: string;
+  best_use_case: string;
+  project_type: string;
+  verdict: string;
+  risk: string;
+  repo_name: string | null;
+  repo_goal: string | null;
+  editor_reply: string;
+  status: string;
+  created_at: string;
+}
+
+export interface Repository {
+  id: number;
+  phone_id: string;
+  opportunity_id: number | null;
+  repo_name: string;
+  repo_url: string;
+  full_name: string;
+  default_branch: string;
+  status: string;
+  created_at: string;
+}
+
+export interface BuildRun {
+  id: number;
+  repository_id: number;
+  run_type: string;
+  summary: string;
+  commit_sha: string | null;
+  pr_url: string | null;
+  status: string;
   created_at: string;
 }
 
@@ -136,6 +226,27 @@ const stmts = {
   bumpTopicAffinityStmt: db.prepare("UPDATE users SET topic_affinity = $aff WHERE phone_id = $phoneId"),
   alreadySentTodayStmt:  db.prepare("SELECT 1 FROM briefing_log WHERE phone_id = $phoneId AND briefing_type = $type AND date(sent_at) = date('now')"),
   recordBriefingStmt:    db.prepare("INSERT INTO briefing_log (phone_id, briefing_type) VALUES ($phoneId, $type)"),
+
+  // Opportunities
+  insertOpportunity:     db.prepare(`
+    INSERT INTO opportunities (phone_id, signal, why_now, best_use_case, project_type, verdict, risk, repo_name, repo_goal, editor_reply)
+    VALUES ($phoneId, $signal, $whyNow, $bestUseCase, $projectType, $verdict, $risk, $repoName, $repoGoal, $editorReply)
+  `),
+  getLastOpportunity:    db.prepare("SELECT * FROM opportunities WHERE phone_id = $phoneId ORDER BY created_at DESC LIMIT 1"),
+  getOpportunities:      db.prepare("SELECT * FROM opportunities WHERE phone_id = $phoneId ORDER BY created_at DESC LIMIT $limit"),
+
+  // Repositories
+  insertRepository:      db.prepare(`
+    INSERT INTO repositories (phone_id, opportunity_id, repo_name, repo_url, full_name)
+    VALUES ($phoneId, $opportunityId, $repoName, $repoUrl, $fullName)
+  `),
+  getRepositories:       db.prepare("SELECT * FROM repositories WHERE phone_id = $phoneId ORDER BY created_at DESC"),
+
+  // Build runs
+  insertBuildRun:        db.prepare(`
+    INSERT INTO build_runs (repository_id, run_type, summary, commit_sha, pr_url, status)
+    VALUES ($repositoryId, $runType, $summary, $commitSha, $prUrl, $status)
+  `),
 };
 
 // ─── API ─────────────────────────────────────────────────────────────────────
@@ -249,6 +360,78 @@ export function alreadySentToday(phoneId: string, type: "morning" | "evening"): 
 
 export function recordBriefingLog(phoneId: string, type: "morning" | "evening"): void {
   stmts.recordBriefingStmt.run({ $phoneId: phoneId, $type: type });
+}
+
+// ─── Opportunities ────────────────────────────────────────────────────────────
+
+export function saveOpportunity(
+  phoneId: string,
+  o: Pick<Opportunity, "signal" | "why_now" | "best_use_case" | "project_type" | "verdict" | "risk" | "repo_name" | "repo_goal" | "editor_reply">
+): number {
+  const res = stmts.insertOpportunity.run({
+    $phoneId: phoneId,
+    $signal: o.signal,
+    $whyNow: o.why_now,
+    $bestUseCase: o.best_use_case,
+    $projectType: o.project_type,
+    $verdict: o.verdict,
+    $risk: o.risk,
+    $repoName: o.repo_name ?? null,
+    $repoGoal: o.repo_goal ?? null,
+    $editorReply: o.editor_reply,
+  });
+  return res.lastInsertRowid as number;
+}
+
+export function getLastOpportunity(phoneId: string): Opportunity | null {
+  return stmts.getLastOpportunity.get({ $phoneId: phoneId }) as Opportunity | null;
+}
+
+export function getOpportunities(phoneId: string, limit = 10): Opportunity[] {
+  return stmts.getOpportunities.all({ $phoneId: phoneId, $limit: limit }) as Opportunity[];
+}
+
+// ─── Repositories ─────────────────────────────────────────────────────────────
+
+export function saveRepository(
+  phoneId: string,
+  opportunityId: number | null,
+  repoName: string,
+  repoUrl: string,
+  fullName: string
+): number {
+  const res = stmts.insertRepository.run({
+    $phoneId: phoneId,
+    $opportunityId: opportunityId,
+    $repoName: repoName,
+    $repoUrl: repoUrl,
+    $fullName: fullName,
+  });
+  return res.lastInsertRowid as number;
+}
+
+export function getRepositories(phoneId: string): Repository[] {
+  return stmts.getRepositories.all({ $phoneId: phoneId }) as Repository[];
+}
+
+// ─── Build runs ───────────────────────────────────────────────────────────────
+
+export function saveBuildRun(
+  repositoryId: number,
+  runType: string,
+  summary: string,
+  commitSha?: string,
+  prUrl?: string,
+  status = "complete"
+): void {
+  stmts.insertBuildRun.run({
+    $repositoryId: repositoryId,
+    $runType: runType,
+    $summary: summary,
+    $commitSha: commitSha ?? null,
+    $prUrl: prUrl ?? null,
+    $status: status,
+  });
 }
 
 export { db };

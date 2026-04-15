@@ -13,7 +13,11 @@ export type IntentType =
   | "save"
   | "recall"
   | "reminder"
-  | "onboarding";
+  | "onboarding"
+  | "opportunity_query"
+  | "build_this"
+  | "refine_build"
+  | "repo_status";
 
 export interface ClassifiedIntent {
   intent: IntentType;
@@ -44,6 +48,10 @@ const INTENT_SCHEMA: Record<string, unknown> = {
         "recall",
         "reminder",
         "onboarding",
+        "opportunity_query",
+        "build_this",
+        "refine_build",
+        "repo_status",
       ],
     },
     topic:               { type: ["string", "null"] },
@@ -78,7 +86,16 @@ For reminder, extract time_expression (e.g. "2 hours", "5pm", "tonight").
 For preference_update, extract preference_key (topics|skill_level|response_style) and preference_value.
 For onboarding, extract extracted_topics as an array of topic strings from the user's response.
 For follow_up or build_idea with refinements, set references_previous: true.
-For modifiers: capture words like "brief", "technical", "simple", "detailed", "startup", "weekend", "quick".`;
+For modifiers: capture words like "brief", "technical", "simple", "detailed", "startup", "weekend", "quick".
+
+Additional intents:
+- opportunity_query: asking what is worth building on, what new tech is actually useful ("what new thing is worth building on?", "what repo should I look at?", "what should we actually ship?", "what's the best opportunity right now?")
+- build_this: user wants to scaffold a GitHub repo ("build it", "build the best one", "create a repo for that", "scaffold that", "build this", "go build it")
+- refine_build: user wants to iterate on an existing repo ("make it more useful for teams", "add support for X", "iterate on the repo", "update the project", "refine that build")
+- repo_status: asking what has been built ("what have you built?", "show my repos", "what did you ship?", "what repos do I have?", "what have you shipped for me?")
+
+For build_this, if the user references a specific technology or idea, capture it in topic.
+For refine_build, capture the refinement instruction in modifiers.`;
 
 // ─── Main export ─────────────────────────────────────────────────────────────
 
@@ -107,18 +124,31 @@ export async function classifyIntent(
 /** Simple heuristic fallback if the LLM call fails. */
 function fallback(text: string): ClassifiedIntent {
   const t = text.toLowerCase();
-  if (t.includes("morning") || t.includes("good morning")) return { intent: "daily_briefing", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
-  if (t.includes("night") || t.includes("evening")) return { intent: "evening_summary", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
-  if (t === "build?" || t.includes("build") || t.includes("startup") || t.includes("idea")) return { intent: "build_idea", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
-  if (t === "whats new" || t === "whats new?") return { intent: "topic_query", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
-  if (t.includes("save") || t.includes("bookmark")) return { intent: "save", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
-  if (t.includes("saved") || t.includes("recall") || t.includes("my ideas")) return { intent: "recall", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
-  if (t.includes("remind")) return { intent: "reminder", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
+
+  const base = (intent: IntentType, overrides: Partial<ClassifiedIntent> = {}): ClassifiedIntent => ({
+    intent,
+    modifiers: [],
+    references_previous: false,
+    extracted_topics: [],
+    ...overrides,
+  });
+
+  if (t.includes("morning") || t.includes("good morning")) return base("daily_briefing");
+  if (t.includes("night") || t.includes("evening")) return base("evening_summary");
+  if (t.includes("build it") || t.includes("scaffold") || t.includes("create a repo") || t.includes("go build")) return base("build_this", { references_previous: true });
+  if (t.includes("what have you built") || t.includes("my repos") || t.includes("what did you ship") || t.includes("show my repos")) return base("repo_status");
+  if (t.includes("worth building") || t.includes("what should we ship") || t.includes("best opportunity")) return base("opportunity_query");
+  if (t.includes("iterate") || t.includes("refine") || (t.includes("add") && t.includes("repo"))) return base("refine_build", { references_previous: true });
+  if (t === "build?" || t.includes("build") || t.includes("startup") || t.includes("idea")) return base("build_idea");
+  if (t === "whats new" || t === "whats new?") return base("topic_query");
+  if (t.includes("save") || t.includes("bookmark")) return base("save");
+  if (t.includes("saved") || t.includes("recall") || t.includes("my ideas")) return base("recall");
+  if (t.includes("remind")) return base("reminder");
+
   // Onboarding fallback: if user mentions tech topics, extract them
   const topicKeywords = ["ai", "devtools", "crypto", "cybersecurity", "mobile", "cloud", "web3", "machine learning", "software"];
   const foundTopics = topicKeywords.filter((kw) => t.includes(kw));
-  if (foundTopics.length > 0) {
-    return { intent: "onboarding", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: foundTopics };
-  }
-  return { intent: "daily_briefing", topic: null, modifiers: [], references_previous: false, preference_key: null, preference_value: null, time_expression: null, extracted_topics: [] };
+  if (foundTopics.length > 0) return base("onboarding", { extracted_topics: foundTopics });
+
+  return base("daily_briefing");
 }
